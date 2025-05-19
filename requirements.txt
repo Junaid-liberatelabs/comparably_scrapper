@@ -1,0 +1,8 @@
+fastapi
+uvicorn[standard]
+selenium
+webdriver-manager
+beautifulsoup4
+pydantic
+fake-useragent
+requests 
