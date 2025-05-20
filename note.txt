@@ -1,6 +1,10 @@
 main - > takes a lot of time
-v2 -> parallel task reduces time
+v2 -> parallel task reduces time (selenium)
 
-v3 -> added date filter
+v3 -> added date filter (selenium)
 
-v4 - > curl cffi
+v4 - > selelnium + curl cffi (selenium)
+
+v5 -> playwright
+
+v6 -> selenium + request hybrid approach
