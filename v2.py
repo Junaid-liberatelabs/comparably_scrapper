@@ -340,14 +340,6 @@ def scrape_comparably_sync(company_base_url_str: str, company_slug: str) -> Dict
             except Exception as e_future:
                 print(f"  [{company_slug}] Category scraping task for '{original_category_name}' generated an exception: {e_future}")
 
-    # Optional: Post-merge de-duplication of questions if needed, though unlikely if tracker is good
-    # final_unique_questions = []
-    # seen_q_texts = set()
-    # for q_obj in all_questions_for_company:
-    #    if q_obj.question_text not in seen_q_texts:
-    #        final_unique_questions.append(q_obj)
-    #        seen_q_texts.add(q_obj.question_text)
-    # all_questions_for_company = final_unique_questions
 
     total_duration = time.time() - start_time_total
     print(f"\nFinished ALL parallel category scrapes for {company_slug} in {total_duration:.2f}s. Total questions collected: {len(all_questions_for_company)}")

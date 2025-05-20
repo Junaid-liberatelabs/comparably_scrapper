@@ -6,3 +6,4 @@ beautifulsoup4
 pydantic
 fake-useragent
 requests 
+curl_cffi 

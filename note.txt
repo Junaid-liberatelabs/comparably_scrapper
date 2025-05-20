@@ -1,0 +1,6 @@
+main - > takes a lot of time
+v2 -> parallel task reduces time
+
+v3 -> added date filter
+
+v4 - > curl cffi
