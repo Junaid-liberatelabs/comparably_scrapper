@@ -7,4 +7,6 @@ v4 - > selelnium + curl cffi (selenium)
 
 v5 -> playwright
 
-v6 -> selenium + request hybrid approach
+v6 -> selenium + request-html
+
+v7 -> refined  - current best

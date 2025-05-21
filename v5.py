@@ -10,13 +10,12 @@ from urllib.parse import urlparse, urljoin
 import traceback
 import sys
 
-# --- START: Playwright Windows asyncio fix ---
+
 if sys.platform == "win32" and sys.version_info >= (3, 8):
     print("Applying WindowsSelectorEventLoopPolicy for Playwright compatibility.")
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
-# --- END: Playwright Windows asyncio fix ---
 
-# --- Pydantic Models ---
+
 from pydantic import BaseModel, Field, HttpUrl, ValidationError
 
 class Review(BaseModel):

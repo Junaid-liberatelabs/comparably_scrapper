@@ -7,4 +7,3 @@ pydantic
 fake-useragent
 requests 
 curl_cffi
-httpx

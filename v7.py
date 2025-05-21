@@ -36,7 +36,7 @@ from fastapi import FastAPI, HTTPException, Body
 app = FastAPI(
     title="Comparably Scraper API - Selenium CatNav, Curl-CFFI Q-ReviewNav",
     description="Selenium for Category page navigation, Curl-CFFI for Q-Review pagination.",
-    version="2.0.0" 
+    version="2.0.1" # Updated version for the fix
 )
 
 
@@ -81,7 +81,6 @@ REVIEW_BLOCK_CSS_SELECTOR = "div.cppRH"
 
 # --- Helper: Extract Section Name (Unchanged) ---
 def extract_section_name_from_url(href: Optional[str]) -> str:
-    # ... (same as before)
     if not href: return "unknown_section"
     try:
         path_parts = urlparse(href).path.strip('/').split('/')
@@ -96,7 +95,6 @@ def _parse_reviews_from_block(
     start_date_filter: Optional[datetime],
     end_date_filter: Optional[datetime]
 ) -> List[Review]:
-    # ... (same as before)
     reviews_found: List[Review] = []
     review_blocks = review_container_soup.find_all('div', class_='cppRH')
     for block_idx, block in enumerate(review_blocks):
@@ -118,7 +116,6 @@ def _parse_reviews_from_block(
 
 # --- Function to Extract Basic Company Info (Unchanged) ---
 def extract_company_info(soup: BeautifulSoup, company_base_url_str: str) -> Dict:
-    # ... (same as before)
     details = {}
     try:
         parsed_base_url = urlparse(str(company_base_url_str)); path_parts = parsed_base_url.path.strip('/').split('/')
@@ -143,7 +140,6 @@ def extract_company_info(soup: BeautifulSoup, company_base_url_str: str) -> Dict
 
 # --- Selenium Setup (Unchanged) ---
 def setup_selenium_driver() -> webdriver.Chrome:
-    # ... (same as before)
     options = webdriver.ChromeOptions()
     options.add_argument("--headless")
     options.add_argument("--no-sandbox")
@@ -168,12 +164,11 @@ def setup_selenium_driver() -> webdriver.Chrome:
 # --- NEW Scraper: Selenium for Category Pages, Curl-CFFI for Q-Review Pages ---
 def _scrape_category_deep_reviews_selenium_curl(
     company_base_url_str: str,
-    category_name_arg: str, # Use a distinct name for the argument
+    category_name_arg: str, 
     company_slug: str,
     start_date_filter: Optional[datetime] = None,
     end_date_filter: Optional[datetime] = None
 ) -> Tuple[str, List[Question]]:
-    # Use category_name_arg consistently within this function scope
     thread_name = f"SelCatCurlQ-{category_name_arg}-{company_slug[:10]}"
     print(f"  [{thread_name}] Started for category: {category_name_arg}")
     
@@ -184,18 +179,16 @@ def _scrape_category_deep_reviews_selenium_curl(
     try:
         category_driver = setup_selenium_driver()
         category_wait = WebDriverWait(category_driver, SELENIUM_ELEMENT_TIMEOUT_S)
-        # Shorter wait for interactive elements like pagination buttons
         category_button_wait = WebDriverWait(category_driver, max(5, SELENIUM_ELEMENT_TIMEOUT_S // 3))
-
 
         category_url_start = urljoin(company_base_url_str.rstrip('/') + "/", f"reviews/{category_name_arg}/")
         print(f"  [{thread_name}] Selenium navigating to initial Cat Page: {category_url_start}")
         category_driver.get(category_url_start)
-        time.sleep(random.uniform(1.5, 2.5)) # Initial load wait
+        time.sleep(random.uniform(1.5, 2.5)) 
 
-        user_agent_hdr = category_driver.execute_script("return navigator.userAgent;") # Get UA from current driver
+        user_agent_hdr = category_driver.execute_script("return navigator.userAgent;") 
         base_curl_headers = {
-            'User-Agent': user_agent_hdr, # Use Selenium's UA for curl-cffi
+            'User-Agent': user_agent_hdr, 
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.9',
             'Accept-Language': 'en-US,en;q=0.9',
         }
@@ -207,7 +200,6 @@ def _scrape_category_deep_reviews_selenium_curl(
             print(f"  [{thread_name}] Selenium on Cat Page {category_page_count} (URL: {current_category_page_url})")
 
             try:
-                # Wait for at least one question block or review item to be present
                 category_wait.until(
                     EC.presence_of_element_located((By.CSS_SELECTOR, "div.reviewsList, div.cppRH"))
                 )
@@ -215,17 +207,15 @@ def _scrape_category_deep_reviews_selenium_curl(
                 print(f"  [{thread_name}] Timeout waiting for review content on Cat Page {category_page_count}.")
                 if category_page_count == 1:
                     print(f"  [{thread_name}] Initial category page for '{category_name_arg}' appears empty or inaccessible.")
-                break # Stop trying for this category
+                break 
 
-            # Get cookies from the *current* Selenium page state for curl-cffi
             current_selenium_cookies = {c['name']: c['value'] for c in category_driver.get_cookies()}
-
             soup_current_category_page = BeautifulSoup(category_driver.page_source, 'html.parser')
             
             question_blocks_on_cat_page = soup_current_category_page.find_all('div', class_='reviewsList')
             if not question_blocks_on_cat_page and category_page_count > 1 :
                  print(f"  [{thread_name}] No 'div.reviewsList' found on Cat Page {category_page_count}, was likely end.")
-                 break # If no question blocks on a subsequent page, probably end of category pages
+                 break 
 
             for q_block_idx, q_block_soup in enumerate(question_blocks_on_cat_page):
                 q_elem = q_block_soup.find('h2', class_='section-subtitle')
@@ -234,11 +224,11 @@ def _scrape_category_deep_reviews_selenium_curl(
                 print(f"    [{thread_name}] Q{q_block_idx+1}: '{question_text[:60]}...'")
 
                 all_reviews_for_this_q: List[Review] = []
-                current_q_reviews_html_segment = q_block_soup # Start with the segment from the category page
+                current_q_reviews_html_segment = q_block_soup 
                 current_q_reviews_source_url = current_category_page_url
 
                 with CurlCffiSession(impersonate=CURL_IMPERSONATE_BROWSER) as curl_q_session:
-                    curl_q_session.cookies.update(current_selenium_cookies) # Use fresh cookies from current Selenium page
+                    curl_q_session.cookies.update(current_selenium_cookies) 
 
                     q_review_page_num = 0
                     while q_review_page_num < MAX_REVIEW_PAGES_PER_QUESTION:
@@ -265,21 +255,34 @@ def _scrape_category_deep_reviews_selenium_curl(
                         pagination_scope_for_q = current_q_reviews_html_segment.find(['nav', 'ul', 'div'],
                             class_=lambda x: x and any(p in x.lower() for p in ['pagination', 'pager', 'page-links', 'qa-Pagination', 'cp-Pagination']),
                             recursive=True 
-                        ) or current_q_reviews_html_segment # Fallback to the segment itself
+                        ) or current_q_reviews_html_segment 
 
                         for sel in NEXT_PAGE_SELECTORS:
                             buttons = pagination_scope_for_q.select(sel)
                             for btn_tag in buttons:
                                 href = btn_tag.get('href')
-                                is_prev = "prev" in (btn_tag.get("aria-label","") + btn_tag.get("rel","") + btn_tag.get_text(strip=True)).lower()
-                                is_disabled = any(cls in (btn_tag.get('class', [])) for cls in ['disabled', 'inactive']) or btn_tag.has_attr('disabled')
-                                if is_prev or is_disabled: continue
+                                
+                                aria_label_str_q_btn = btn_tag.get("aria-label", "")
+                                rel_value_q_btn = btn_tag.get("rel")
+                                rel_str_q_btn = ""
+                                if isinstance(rel_value_q_btn, list):
+                                    rel_str_q_btn = " ".join(rel_value_q_btn)
+                                elif rel_value_q_btn: 
+                                    rel_str_q_btn = rel_value_q_btn
+                                text_content_str_q_btn = btn_tag.get_text(strip=True)
+                                combined_test_str_q_btn = f"{aria_label_str_q_btn} {rel_str_q_btn} {text_content_str_q_btn}".lower()
+                                current_btn_is_prev = "prev" in combined_test_str_q_btn
+                                
+                                current_btn_is_disabled = any(cls in (btn_tag.get('class', [])) for cls in ['disabled', 'inactive']) or btn_tag.has_attr('disabled')
+                                
+                                if current_btn_is_prev or current_btn_is_disabled: continue
+                                
                                 if href and href != "#" and not href.startswith("javascript:"):
                                     next_q_review_page_href = urljoin(current_q_reviews_source_url, href)
                                     break
                             if next_q_review_page_href: break
                         
-                        if not next_q_review_page_href: break # No more pages for this Question's reviews
+                        if not next_q_review_page_href: break 
 
                         try:
                             time.sleep(random.uniform(0.7, 1.5)) 
@@ -291,7 +294,7 @@ def _scrape_category_deep_reviews_selenium_curl(
                             
                             current_q_reviews_html_segment = BeautifulSoup(response_q_review_page.text, 'html.parser')
                             current_q_reviews_source_url = str(response_q_review_page.url)
-                            if current_q_reviews_html_segment.find('h2', class_='section-subtitle'): # Safety break
+                            if current_q_reviews_html_segment.find('h2', class_='section-subtitle'): 
                                 print(f"        [{thread_name}] WARNING: Fetched Q-review page {next_q_review_page_href} looks like a full category page. Stopping Q-pagination.")
                                 current_q_reviews_html_segment = BeautifulSoup("", 'html.parser') 
                                 break 
@@ -303,57 +306,65 @@ def _scrape_category_deep_reviews_selenium_curl(
                             print(f"        [{thread_name}] Generic Error Q-REVIEW page {next_q_review_page_href}: {e_gen}")
                             traceback.print_exc()
                             break
-                # End Q-review curl_cffi session
                 
                 if all_reviews_for_this_q:
                     all_reviews_for_this_q.sort(key=lambda r: r.date, reverse=True)
                     existing_q_obj = next((q for q in collected_questions_for_this_category if q.question_text == question_text), None)
-                    if existing_q_obj: # Should be rare if pages are distinct
+                    if existing_q_obj: 
                         for r_new in all_reviews_for_this_q:
                             if not any(er.text == r_new.text and er.date == r_new.date for er in existing_q_obj.review_section.reviews):
                                 existing_q_obj.review_section.reviews.append(r_new)
                         existing_q_obj.review_section.reviews.sort(key=lambda r: r.date, reverse=True)
                     else:
-                        # Crucial: Use category_name_arg from the outer function for correct section name
                         print(f"    [{thread_name}] Creating ReviewSection with section_name: {category_name_arg} for Q: '{question_text[:30]}'")
                         review_section = ReviewSection(section_name=category_name_arg, reviews=all_reviews_for_this_q)
                         question_obj = Question(question_text=question_text, review_section=review_section)
                         collected_questions_for_this_category.append(question_obj)
-            # End for q_block_idx
 
             # Selenium navigates to NEXT CATEGORY PAGE
             next_category_page_button = None
-            # Search for category pagination at a higher level, not inside individual reviewLists
             cat_page_nav_scope = soup_current_category_page.find('nav', attrs={'aria-label': lambda x: x and 'pagination' in x.lower()}) or \
                                  soup_current_category_page.find('ul', class_=lambda x: x and 'pagination' in x.lower()) or \
-                                 soup_current_category_page # Fallback to whole page
+                                 soup_current_category_page 
             
-            found_next_cat_link_in_soup = False
             for sel in NEXT_PAGE_SELECTORS:
                 potential_btns_soup = cat_page_nav_scope.select(sel)
-                for btn_s in potential_btns_soup:
-                    # Heuristic: if this link is inside a reviewList, it's for Q-reviews, not category nav
+                for btn_s in potential_btns_soup: # This is the loop where the error occurred
                     if btn_s.find_parent('div', class_='reviewsList'): continue
                     
-                    is_prev = "prev" in (btn_s.get("aria-label","") + btn_s.get("rel","") + btn_s.get_text(strip=True)).lower()
-                    is_disabled = any(cls in (btn_s.get('class', [])) for cls in ['disabled', 'inactive']) or btn_s.has_attr('disabled')
-                    if not is_prev and not is_disabled and btn_s.get('href') and btn_s.get('href') != '#':
-                        # Try to find this button with Selenium to click it
+                    # --- CORRECTED SECTION for Category Pagination (was line ~338) ---
+                    aria_label_str_cat_btn = btn_s.get("aria-label", "")
+                    rel_value_cat_btn = btn_s.get("rel") # This might be a list
+                    rel_str_cat_btn = ""
+                    if isinstance(rel_value_cat_btn, list):
+                        rel_str_cat_btn = " ".join(rel_value_cat_btn) # Join if list
+                    elif rel_value_cat_btn: # If it's a non-empty string
+                        rel_str_cat_btn = rel_value_cat_btn
+                    
+                    text_content_str_cat_btn = btn_s.get_text(strip=True)
+                    
+                    # Safely combine strings for the check
+                    combined_test_str_cat_btn = f"{aria_label_str_cat_btn} {rel_str_cat_btn} {text_content_str_cat_btn}".lower()
+                    current_cat_btn_is_prev = "prev" in combined_test_str_cat_btn
+                    # --- END OF CORRECTION ---
+
+                    current_cat_btn_is_disabled = any(cls in (btn_s.get('class', [])) for cls in ['disabled', 'inactive']) or btn_s.has_attr('disabled')
+                    
+                    # Use the corrected boolean for the 'is_prev' check
+                    if not current_cat_btn_is_prev and not current_cat_btn_is_disabled and btn_s.get('href') and btn_s.get('href') != '#':
                         try:
-                            # Re-locate the specific button element via Selenium using a more precise selector if possible
-                            # For now, we'll just use the general selector and hope it's the right one
                             selenium_btns = category_driver.find_elements(By.CSS_SELECTOR, sel)
                             for sel_btn in selenium_btns:
                                 if sel_btn.is_displayed() and sel_btn.get_attribute('href') == urljoin(current_category_page_url, btn_s.get('href')):
-                                     # Check if it's inside a reviewList using Selenium's perspective
                                     try:
                                         sel_btn.find_element(By.XPATH, "./ancestor::div[contains(@class, 'reviewsList')]")
-                                        continue # Skip if it's Q-review pagination
+                                        continue 
                                     except NoSuchElementException:
-                                        pass # Good, it's not Q-review pagination
+                                        pass 
 
-                                    if "prev" not in (sel_btn.get_attribute("aria-label") or "").lower() and \
-                                       "prev" not in (sel_btn.get_attribute("rel") or "").lower():
+                                    sel_aria_label = (sel_btn.get_attribute("aria-label") or "").lower()
+                                    sel_rel = (sel_btn.get_attribute("rel") or "").lower()
+                                    if "prev" not in sel_aria_label and "prev" not in sel_rel :
                                         next_category_page_button = category_button_wait.until(EC.element_to_be_clickable(sel_btn))
                                         if next_category_page_button: break
                             if next_category_page_button: break
@@ -362,14 +373,14 @@ def _scrape_category_deep_reviews_selenium_curl(
             
             if not next_category_page_button :
                 print(f"  [{thread_name}] No clickable 'Next Category Page' button found by Selenium after Cat Page {category_page_count}.")
-                break # End of category pages
+                break 
 
             print(f"  [{thread_name}] Selenium clicking 'Next Category Page'...")
             try:
                 category_driver.execute_script("arguments[0].scrollIntoView({behavior: 'auto', block: 'center'});", next_category_page_button)
                 time.sleep(0.3)
                 next_category_page_button.click()
-                time.sleep(random.uniform(2.0, 3.5)) # Wait for next category page to load
+                time.sleep(random.uniform(2.0, 3.5)) 
             except ElementClickInterceptedException:
                 print(f"  [{thread_name}] Click intercepted, trying JS click for 'Next Category Page'...")
                 category_driver.execute_script("arguments[0].click();", next_category_page_button)
@@ -377,7 +388,6 @@ def _scrape_category_deep_reviews_selenium_curl(
             except Exception as e_click:
                 print(f"  [{thread_name}] Error clicking 'Next Category Page': {e_click}")
                 break
-        # End while loop for category pages
 
     except Exception as e_cat_main:
         print(f"  [{thread_name}] MAJOR ERROR in category '{category_name_arg}': {e_cat_main}")
@@ -385,7 +395,6 @@ def _scrape_category_deep_reviews_selenium_curl(
     finally:
         if category_driver:
             category_driver.quit()
-            # print(f"  [{thread_name}] Selenium WebDriver for category '{category_name_arg}' quit.")
 
     print(f"  [{thread_name}] Finished category '{category_name_arg}'. Total Qs: {len(collected_questions_for_this_category)}")
     return category_name_arg, collected_questions_for_this_category
@@ -404,7 +413,6 @@ def scrape_comparably_sync(
     company_details_overall: Dict[str, Any] = {}
     initial_info_driver = None
 
-    # Step 1: Fetch Initial Company Info (Selenium)
     try:
         print(f"  [{company_slug}] Fetching initial company info with Selenium...")
         initial_info_driver = setup_selenium_driver()
@@ -429,16 +437,15 @@ def scrape_comparably_sync(
             try: initial_info_driver.quit()
             except Exception as e_close: print(f"  [{company_slug}] Error closing Selenium info browser: {e_close}")
 
-    # Step 2: Scrape categories in parallel
-    max_concurrent_categories = min(len(REVIEW_CATEGORIES), 3) # Keep this to avoid too many Selenium instances
+    max_concurrent_categories = min(len(REVIEW_CATEGORIES), 3) 
     print(f"  [{company_slug}] Starting SELENIUM_CAT_CURL_Q_REVIEW parallel scrape for {len(REVIEW_CATEGORIES)} categories (max {max_concurrent_categories} concurrent)...")
     futures_map = {}
     with ThreadPoolExecutor(max_workers=max_concurrent_categories, thread_name_prefix="SelCatCurlQPool") as executor:
-        for cat_name_from_list in REVIEW_CATEGORIES: # Use a distinct loop variable
+        for cat_name_from_list in REVIEW_CATEGORIES: 
             future = executor.submit(
-                _scrape_category_deep_reviews_selenium_curl, # New function name
+                _scrape_category_deep_reviews_selenium_curl, 
                 company_base_url_str, 
-                cat_name_from_list, # Pass the specific category for this task
+                cat_name_from_list, 
                 company_slug,
                 start_date_filter, 
                 end_date_filter
@@ -448,9 +455,7 @@ def scrape_comparably_sync(
         for future in as_completed(futures_map):
             original_category_name_processed = futures_map[future]
             try:
-                # _scrape_category_deep_reviews_selenium_curl returns (category_name, questions_list)
                 processed_cat_name, questions_from_category = future.result() 
-                # Ensure the returned category name matches what was submitted, sanity check.
                 if processed_cat_name != original_category_name_processed:
                      print(f"  [{company_slug}] WARNING: Mismatch in returned category name. Expected '{original_category_name_processed}', got '{processed_cat_name}'.")
                 
@@ -481,7 +486,7 @@ def scrape_comparably_sync(
         }
     }
 
-# --- FastAPI Endpoint (Unchanged) ---
+# --- FastAPI Endpoint (Unchanged, but note the version in app.title) ---
 @app.post("/scrape")
 async def scrape_companies(request: ScrapeRequest = Body(...)) -> Dict[str, Dict[str, Any]]:
     urls = request.urls; start_date_filter: Optional[datetime] = None; end_date_filter: Optional[datetime] = None
@@ -494,8 +499,7 @@ async def scrape_companies(request: ScrapeRequest = Body(...)) -> Dict[str, Dict
     if start_date_filter and end_date_filter and start_date_filter > end_date_filter: raise HTTPException(status_code=400, detail="start_date_str cannot be after end_date_str.")
     if not urls: raise HTTPException(status_code=400, detail="No URLs provided.")
     results: Dict[str, Dict[str, Any]] = {}; valid_scrape_params = []
-    date_filter_msg = f" (Start: {request.start_date_str or 'N/A'}, End: {request.end_date_str or 'N/A'})"
-    print(f"API request: {len(urls)} URLs, Selenium CatNav & Curl Q-ReviewNav (v{app.version}).")
+    print(f"API request: {len(urls)} URLs, Selenium CatNav & Curl Q-ReviewNav (v{app.version}).") # Will print v2.0.1
     for url_obj in urls:
         url_str = str(url_obj)
         try:
@@ -529,4 +533,3 @@ async def scrape_companies(request: ScrapeRequest = Body(...)) -> Dict[str, Dict
         else: results[original_url_str] = {"status": "error", "message": "Scraping task result missing (logic error)."}
     print(f"Finished API request processing (SelCatCurlQ v{app.version}).")
     return results
-
