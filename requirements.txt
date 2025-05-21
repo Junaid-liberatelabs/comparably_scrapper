@@ -1,9 +1,8 @@
 fastapi
 uvicorn[standard]
+pydantic
+beautifulsoup4
 selenium
 webdriver-manager
-beautifulsoup4
-pydantic
-fake-useragent
-requests 
 curl_cffi
+fake-useragent

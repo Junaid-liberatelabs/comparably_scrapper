@@ -1,4 +1,7 @@
 main - > takes a lot of time
+
+v1 -> no parallel
+
 v2 -> parallel task reduces time (selenium)
 
 v3 -> added date filter (selenium)
