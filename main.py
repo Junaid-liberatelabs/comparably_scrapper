@@ -3,6 +3,11 @@
 from fastapi import FastAPI
 from app.api.scrape_endpoint import router as scrape_router
 from app.core.config import API_TITLE, API_DESCRIPTION, API_VERSION
+import logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(name)s | %(message)s"
+)
 
 app = FastAPI(
     title=API_TITLE,

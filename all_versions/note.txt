@@ -1,4 +1,4 @@
-main - > takes a lot of time
+main - > used v7 (current best)
 
 v1 -> no parallel
 
