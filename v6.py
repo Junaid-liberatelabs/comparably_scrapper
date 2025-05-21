@@ -1,5 +1,3 @@
-
-
 import os
 import json
 import re
@@ -21,12 +19,12 @@ class Review(BaseModel):
     date: datetime
 
 class ReviewSection(BaseModel):
-    section_name: str
+    section_name: str # This will be the category name (e.g., leadership)
     reviews: List[Review]
 
 class Question(BaseModel):
     question_text: str
-    review_section: ReviewSection
+    review_section: ReviewSection # Contains all reviews for this question from all its pages
 
 class ScrapeRequest(BaseModel):
     urls: List[HttpUrl]
@@ -36,22 +34,22 @@ class ScrapeRequest(BaseModel):
 # --- FastAPI ---
 from fastapi import FastAPI, HTTPException, Body
 app = FastAPI(
-    title="Comparably Scraper API - Hybrid Selenium/HTTPX & Date Filter",
-    description="API to scrape company reviews from Comparably using Selenium for the first page and HTTPX for subsequent pages, with date filtering.",
-    version="1.7.0" # Version bump for Hybrid Selenium/HTTPX
+    title="Comparably Scraper API - Hybrid Deep Reviews & Date Filter",
+    description="API to scrape Comparably reviews, handling category pagination (Hybrid) and per-question review pagination (HTTPX), with date filtering.",
+    version="1.8.0" # Version bump for deep review pagination
 )
-
+ 
 # --- Selenium and BeautifulSoup ---
 from bs4 import BeautifulSoup
 from selenium import webdriver
-from selenium.common.exceptions import TimeoutException, NoSuchElementException # ElementClickInterceptedException not directly used by hybrid for next page
+from selenium.common.exceptions import TimeoutException, NoSuchElementException
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from webdriver_manager.chrome import ChromeDriverManager
 
-# --- HTTPX for faster subsequent page fetches ---
+# --- HTTPX ---
 import httpx
 
 # --- User Agent ---
@@ -64,21 +62,24 @@ except ImportError:
 
 # --- Constants ---
 REVIEW_CATEGORIES = ["leadership", "compensation", "team", "environment", "outlook"]
-MAX_PAGES_PER_CATEGORY = 15
-SELENIUM_PAGE_TIMEOUT_S = 30  # Seconds for page loads
-SELENIUM_ELEMENT_TIMEOUT_S = 18 # Seconds for element waits
-HTTPX_TIMEOUT_S = 30 # Seconds for httpx requests
+MAX_CATEGORY_PAGES = 15 # Max pages for a category (e.g., Leadership P1, P2...)
+MAX_REVIEW_PAGES_PER_QUESTION = 20 # Max pages of reviews for a single question
+SELENIUM_PAGE_TIMEOUT_S = 30
+SELENIUM_ELEMENT_TIMEOUT_S = 18
+HTTPX_TIMEOUT_S = 30
 
-# Selectors for "Next Page" button, usable by both Selenium and BeautifulSoup
+# Selectors for "Next Page" button (generic, used for both category and Q-review pagination)
 NEXT_PAGE_SELECTORS = [
-    "a.pagination-link[rel='next']",
-    "a[aria-label='Next Page']",
-    "a[title='Next Page']",
+    "a.pagination-link[rel='next']", # Common Bootstrap-like
+    "a[aria-label*='Next Page' i]", # Case-insensitive aria-label
+    "a[title*='Next Page' i]",      # Case-insensitive title
     "li.pagination-next > a",
     "a.pagination-next",
-    "nav[aria-label*='pagination'] li:last-child a[href]"
+    "nav[aria-label*='pagination' i] li:last-child a[href]", # Common nav structure
+    ".qa-PaginationPageLink-Next", # Comparably specific class from observation
+    ".page-next > a" # Another common pattern
 ]
-REVIEW_BLOCK_CSS_SELECTOR = "div.cppRH"
+REVIEW_BLOCK_CSS_SELECTOR = "div.cppRH" # Main review item container
 
 
 # --- Helper: Extract Section Name (Unchanged) ---
@@ -91,46 +92,48 @@ def extract_section_name_from_url(href: Optional[str]) -> str:
     match = re.search(r'/reviews/(\w+)', href)
     return match.group(1) if match else "unknown_section"
 
-# --- Integrated Parsing Logic with Date Filter (Unchanged) ---
-def parse_review_page_html(
-    soup: BeautifulSoup,
-    company_slug: str,
-    current_category_for_context: str,
-    start_date_filter: Optional[datetime] = None,
-    end_date_filter: Optional[datetime] = None
-) -> List[Question]:
-    questions: List[Question] = []
-    review_list_divs = soup.find_all('div', class_='reviewsList')
-    if not review_list_divs: return []
-    for review_list_div in review_list_divs:
-        q_elem = review_list_div.find('h2', class_='section-subtitle')
-        if not q_elem: continue
-        question_text = q_elem.get_text(strip=True)
-        section_name_to_use = current_category_for_context
-        reviews_for_this_question: List[Review] = []
-        review_blocks = review_list_div.find_all('div', class_='cppRH')
-        for block in review_blocks:
-            quote = block.find('p', class_='cppRH-review-quote')
-            if not quote: continue
-            text = quote.get_text(strip=True).replace('\u0000', '')
-            cite_block = block.find('cite', class_='cppRH-review-cite')
-            date_meta = None
-            if cite_block:
-                date_meta = cite_block.find('meta', {'itemprop': 'datePublished'}) or \
-                            cite_block.find('meta', attrs={'content': re.compile(r'^\d{4}-\d{2}-\d{2}$')})
-            if not date_meta or not date_meta.get('content'): continue
-            try: date_val = datetime.strptime(date_meta['content'], '%Y-%m-%d')
-            except ValueError: continue
-            if start_date_filter and date_val < start_date_filter: continue
-            if end_date_filter and date_val > end_date_filter: continue
-            reviews_for_this_question.append(Review(text=text, date=date_val))
-        if not reviews_for_this_question: continue
-        reviews_for_this_question.sort(key=lambda r: r.date, reverse=True)
+# --- NEW HELPER: Parses reviews from a given HTML block ---
+def _parse_reviews_from_block(
+    review_container_soup: BeautifulSoup,
+    start_date_filter: Optional[datetime],
+    end_date_filter: Optional[datetime]
+) -> List[Review]:
+    reviews_found: List[Review] = []
+    # Directly find review items, assuming review_container_soup is the correct scope
+    review_blocks = review_container_soup.find_all('div', class_='cppRH') 
+    for block_idx, block in enumerate(review_blocks):
+        quote = block.find('p', class_='cppRH-review-quote')
+        if not quote:
+            # print(f"        _parse_reviews: Skipping block {block_idx} (no quote)")
+            continue
+        text = quote.get_text(strip=True).replace('\u0000', '')
+        
+        cite_block = block.find('cite', class_='cppRH-review-cite')
+        date_meta_tag = None
+        if cite_block:
+            date_meta_tag = cite_block.find('meta', {'itemprop': 'datePublished'}) or \
+                         cite_block.find('meta', attrs={'content': re.compile(r'^\d{4}-\d{2}-\d{2}$')})
+        
+        if not date_meta_tag or not date_meta_tag.get('content'):
+            # print(f"        _parse_reviews: Skipping review (no date_meta_tag): '{text[:30]}...'")
+            continue
+        
         try:
-            section = ReviewSection(section_name=section_name_to_use, reviews=reviews_for_this_question)
-            questions.append(Question(question_text=question_text, review_section=section))
-        except ValidationError as e: print(f"Pydantic validation error (Date Filtered) for '{question_text}' in cat '{current_category_for_context}': {e}")
-    return questions
+            date_val = datetime.strptime(date_meta_tag['content'], '%Y-%m-%d')
+        except ValueError:
+            # print(f"        _parse_reviews: Skipping review (date parse error): '{text[:30]}...'")
+            continue
+
+        if start_date_filter and date_val < start_date_filter:
+            # print(f"        _parse_reviews: Skipping review (before start_date): {date_val.date()} '{text[:30]}...'")
+            continue
+        if end_date_filter and date_val > end_date_filter:
+            # print(f"        _parse_reviews: Skipping review (after end_date): {date_val.date()} '{text[:30]}...'")
+            continue
+        
+        reviews_found.append(Review(text=text, date=date_val))
+    return reviews_found
+
 
 # --- Function to Extract Basic Company Info (Unchanged) ---
 def extract_company_info(soup: BeautifulSoup, company_base_url_str: str) -> Dict:
@@ -143,22 +146,18 @@ def extract_company_info(soup: BeautifulSoup, company_base_url_str: str) -> Dict
         name_tag_h1 = soup.find('h1')
         if name_tag_h1:
             h1_text = name_tag_h1.get_text(strip=True)
-            name_candidate = h1_text # Default to full h1 text
+            name_candidate = h1_text 
             if " Reviews" in h1_text: name_candidate = h1_text.split(" Reviews")[0].strip()
-            # Added check to ensure candidate is not a category name and has reasonable length
             if name_candidate and name_candidate.lower() not in REVIEW_CATEGORIES and len(name_candidate) > 3:
                 details['company_name'] = name_candidate
-        # Fallback or refinement using title tag
         if details['company_name'] == default_name or details['company_name'].lower() in REVIEW_CATEGORIES:
             title_tag = soup.find('title')
             if title_tag:
-                title_text = title_tag.get_text(strip=True)
-                name_from_title = title_text.split(" Reviews")[0].split(" | Comparably")[0].strip()
+                title_text = title_tag.get_text(strip=True); name_from_title = title_text.split(" Reviews")[0].split(" | Comparably")[0].strip()
                 if name_from_title and len(name_from_title) > 3 and name_from_title.lower() not in REVIEW_CATEGORIES:
                      details['company_name'] = name_from_title
     except Exception as e: print(f"Error extracting company details for {company_base_url_str}: {e}")
     return details
-
 
 # --- Selenium Setup (Unchanged) ---
 def setup_selenium_driver() -> webdriver.Chrome:
@@ -173,247 +172,318 @@ def setup_selenium_driver() -> webdriver.Chrome:
     options.add_experimental_option("excludeSwitches", ["enable-automation"])
     options.add_experimental_option('useAutomationExtension', False)
     try:
-        # print(f"  [Selenium Setup] Initializing WebDriver with ChromeDriverManager...") # Less verbose
         service = Service(ChromeDriverManager().install())
         driver = webdriver.Chrome(service=service, options=options)
         driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
         driver.set_page_load_timeout(SELENIUM_PAGE_TIMEOUT_S)
-        # print(f"  [Selenium Setup] WebDriver initialized.") # Less verbose
         return driver
     except Exception as e:
         print(f"  [Selenium Setup] CRITICAL ERROR during Selenium setup: {e}")
         traceback.print_exc()
         raise RuntimeError(f"Failed to setup Selenium WebDriver: {e}")
 
-
-# --- MODIFIED: Hybrid Scraper for a single category ---
+# --- MODIFIED: Hybrid Scraper for a single category, with deep review pagination ---
 def _scrape_specific_category_all_pages_hybrid(
     company_base_url_str: str,
-    category_name: str,
+    category_name: str, # e.g. "leadership"
     company_slug: str,
     start_date_filter: Optional[datetime] = None,
     end_date_filter: Optional[datetime] = None
 ) -> Tuple[str, List[Question]]:
-    thread_name = f"HybridScraper-{category_name}-{company_slug[:10]}"
+    thread_name = f"HybridDeep-{category_name}-{company_slug[:10]}"
     print(f"  [{thread_name}] Started.")
-    category_questions: List[Question] = []
-    processed_reviews_in_this_category_run = set()
-
-    next_page_url_from_selenium: Optional[str] = None
-    selenium_cookies_dict: Optional[Dict[str, str]] = None
     
-    # --- Phase 1: Selenium for the first page ---
-    driver = None
-    try:
-        print(f"  [{thread_name}] Initializing Selenium for first page...")
-        driver = setup_selenium_driver()
-        category_wait = WebDriverWait(driver, SELENIUM_ELEMENT_TIMEOUT_S)
+    # Stores Question objects for this category
+    collected_questions_for_category: List[Question] = []
+    # Global for this category run: (hash(question_text), hash(review.text), review.date)
+    processed_reviews_keys_in_this_category_run = set() 
+
+    # --- Helper to process one category page's soup for questions and their paginated reviews ---
+    def _process_one_category_page_soup(
+        cat_page_soup: BeautifulSoup,
+        cat_page_url: str, # URL that provided this soup, for resolving relative links
+        http_client_for_q_reviews: httpx.Client, # Client to fetch Q-review sub-pages
+        common_headers: Dict[str, str] # Headers for sub-page requests
+    ):
+        nonlocal collected_questions_for_category, processed_reviews_keys_in_this_category_run
         
-        category_url_start = urljoin(company_base_url_str.rstrip('/') + "/", f"reviews/{category_name}/")
-        print(f"  [{thread_name}] Selenium navigating to initial page: {category_url_start}")
+        question_blocks_on_cat_page = cat_page_soup.find_all('div', class_='reviewsList')
+        if not question_blocks_on_cat_page:
+            print(f"    [{thread_name}] No question blocks (div.reviewsList) found on category page: {cat_page_url}")
+            return
+
+        for q_block_idx, q_block_soup_initial in enumerate(question_blocks_on_cat_page):
+            q_elem = q_block_soup_initial.find('h2', class_='section-subtitle')
+            if not q_elem: continue
+            question_text = q_elem.get_text(strip=True)
+            print(f"    [{thread_name}] Q{q_block_idx+1}: '{question_text[:60]}...'")
+            
+            all_reviews_for_this_single_q: List[Review] = []
+            current_q_reviews_content_soup = q_block_soup_initial # Start with the content from category page
+            current_q_reviews_source_url = cat_page_url
+            
+            q_review_page_num = 0
+            while q_review_page_num < MAX_REVIEW_PAGES_PER_QUESTION:
+                q_review_page_num += 1
+                # print(f"      [{thread_name}] Q-Review Page {q_review_page_num} for '{question_text[:30]}...' (Source: {current_q_reviews_source_url})")
+
+                reviews_from_current_content = _parse_reviews_from_block(
+                    current_q_reviews_content_soup, start_date_filter, end_date_filter
+                )
+                
+                newly_added_to_this_q_count = 0
+                for r_parsed in reviews_from_current_content:
+                    r_key = (hash(question_text), hash(r_parsed.text), r_parsed.date)
+                    if r_key not in processed_reviews_keys_in_this_category_run:
+                        all_reviews_for_this_single_q.append(r_parsed)
+                        processed_reviews_keys_in_this_category_run.add(r_key)
+                        newly_added_to_this_q_count +=1
+                
+                if newly_added_to_this_q_count > 0:
+                    print(f"        [{thread_name}] Added {newly_added_to_this_q_count} unique reviews for this Q (Q-Page {q_review_page_num}).")
+                
+                # Find "next page" link for this question's reviews *within current_q_reviews_content_soup*
+                next_q_review_page_href = None
+                # Search within the current block for its own pagination
+                # Common pagination structures: <nav aria-label="pagination"> or <ul class="pagination">
+                pagination_container = current_q_reviews_content_soup.find(['nav', 'ul'], 
+                                                                    class_=lambda x: x and any(p in x.lower() for p in ['pagination', 'pager']),
+                                                                    attrs={'aria-label': lambda x: x and 'pagination' in x.lower()}
+                                                                    ) or current_q_reviews_content_soup # Fallback to whole block
+                
+                for sel in NEXT_PAGE_SELECTORS:
+                    buttons = pagination_container.select(sel)
+                    for btn_tag in buttons:
+                        href = btn_tag.get('href')
+                        # Check attributes to ensure it's "next" not "prev"
+                        aria_label = (btn_tag.get("aria-label", "") or "").lower()
+                        rel_attr = (btn_tag.get("rel", "") or "").lower()
+                        title_attr = (btn_tag.get("title", "") or "").lower()
+                        text_content = btn_tag.get_text(strip=True).lower()
+
+                        is_prev = any(indicator in val for indicator in ["prev", "older", "back"] for val in [aria_label, rel_attr, title_attr, text_content])
+                        is_disabled = any(cls in (btn_tag.get('class', [])) for cls in ['disabled', 'inactive']) or btn_tag.has_attr('disabled')
+                        
+                        if is_prev or is_disabled: continue
+                        
+                        if href and href != "#" and not href.startswith("javascript:"):
+                            next_q_review_page_href = urljoin(current_q_reviews_source_url, href)
+                            # print(f"        [{thread_name}] Found next Q-review page link: {next_q_review_page_href} (selector: '{sel}')")
+                            break
+                    if next_q_review_page_href: break
+                
+                if not next_q_review_page_href:
+                    # print(f"        [{thread_name}] No more Q-review pages for '{question_text[:30]}...'.")
+                    break # Exit while loop for this question's review pages
+
+                # Fetch the next page of reviews for THIS question
+                try:
+                    time.sleep(random.uniform(0.6, 1.3)) # Delay for Q-review pages
+                    q_review_headers = common_headers.copy()
+                    q_review_headers['Referer'] = current_q_reviews_source_url
+                    
+                    # print(f"        [{thread_name}] HTTPX fetching Q-review page: {next_q_review_page_href}")
+                    response_q_review_page = http_client_for_q_reviews.get(next_q_review_page_href, headers=q_review_headers)
+                    response_q_review_page.raise_for_status()
+                    
+                    current_q_reviews_content_soup = BeautifulSoup(response_q_review_page.text, 'html.parser')
+                    current_q_reviews_source_url = str(response_q_review_page.url)
+                except Exception as e_q_rev_fetch:
+                    print(f"        [{thread_name}] Error fetching Q-review page {next_q_review_page_href}: {e_q_rev_fetch}")
+                    break # Stop trying for this question
+            # End of while loop for a single question's review pages (Q-pagination)
+            
+            if all_reviews_for_this_single_q:
+                all_reviews_for_this_single_q.sort(key=lambda r: r.date, reverse=True)
+                # Add or merge this Question object
+                existing_question_obj = next((q for q in collected_questions_for_category if q.question_text == question_text), None)
+                if existing_question_obj: # Should be rare if questions are distinct per category page
+                    print(f"    [{thread_name}] Warning: Question '{question_text[:30]}' re-encountered. Merging reviews.")
+                    # `all_reviews_for_this_single_q` already contains unique items for this specific Q's processing pass
+                    # The `processed_reviews_keys_in_this_category_run` ensures global uniqueness.
+                    # This extend might add duplicates if not careful, but keys set should prevent functional dupes in final list.
+                    existing_question_obj.review_section.reviews.extend(r for r in all_reviews_for_this_single_q if not any(er.text == r.text and er.date == r.date for er in existing_question_obj.review_section.reviews))
+                    existing_question_obj.review_section.reviews.sort(key=lambda r: r.date, reverse=True)
+                else:
+                    try:
+                        review_section = ReviewSection(section_name=category_name, reviews=all_reviews_for_this_single_q)
+                        question_obj = Question(question_text=question_text, review_section=review_section)
+                        collected_questions_for_category.append(question_obj)
+                    except ValidationError as e_val:
+                        print(f"    [{thread_name}] Pydantic error for Q '{question_text[:30]}...': {e_val}")
+                # print(f"    [{thread_name}] Finalized Q: '{question_text[:30]}' with {len(all_reviews_for_this_single_q)} unique reviews after its pagination.")
+        # End of for loop over q_blocks on one category page
+    # End of _process_one_category_page_soup
+
+    # --- Phase 1: Selenium for first CATEGORY page ---
+    driver = None
+    next_category_page_url_from_selenium: Optional[str] = None
+    selenium_cookies_for_hybrid: Optional[Dict[str, str]] = None
+    category_url_start = urljoin(company_base_url_str.rstrip('/') + "/", f"reviews/{category_name}/")
+    
+    user_agent_hdr = ua.random if ua else "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36"
+    base_httpx_headers = {
+        'User-Agent': user_agent_hdr,
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.9',
+        'Accept-Language': 'en-US,en;q=0.9',
+    }
+
+    try:
+        print(f"  [{thread_name}] Selenium: Initializing for Cat Page 1: {category_url_start}")
+        driver = setup_selenium_driver()
         driver.get(category_url_start)
-        time.sleep(random.uniform(0.8, 1.5)) # Wait for potential JS rendering
+        time.sleep(random.uniform(1.5, 2.5)) # Wait for JS
 
         if "Error" in driver.title or "Not Found" in driver.title or "Access Denied" in driver.page_source:
             print(f"  [{thread_name}] Selenium: Error page (Title: {driver.title}). Skipping category.")
             return category_name, []
 
-        print(f"  [{thread_name}] Selenium: Scraping page 1 (URL: {driver.current_url})")
-        try:
-            category_wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, REVIEW_BLOCK_CSS_SELECTOR)))
-        except TimeoutException:
-            print(f"  [{thread_name}] Selenium: Timeout waiting for review content on page 1. Category may be empty or inaccessible.")
-            return category_name, []
-
-        html_content = driver.page_source
-        soup_page1 = BeautifulSoup(html_content, 'html.parser')
-        questions_page1 = parse_review_page_html(soup_page1, company_slug, category_name, start_date_filter, end_date_filter)
+        WebDriverWait(driver, SELENIUM_ELEMENT_TIMEOUT_S).until(
+            EC.presence_of_element_located((By.CSS_SELECTOR, "div.reviewsList, div.cppRH, body")) # Wait for some content
+        )
         
-        # Merge logic for questions (common for both Selenium and HTTPX phases)
-        def merge_questions(new_questions: List[Question]):
-            nonlocal category_questions, processed_reviews_in_this_category_run
-            reviews_added_count = 0
-            for q_new in new_questions:
-                existing_q = next((q for q in category_questions if q.question_text == q_new.question_text), None)
-                if not existing_q:
-                    unique_reviews_for_new_q = []
-                    for r_new in q_new.review_section.reviews:
-                        r_key = (hash(q_new.question_text), hash(r_new.text), r_new.date)
-                        if r_key not in processed_reviews_in_this_category_run:
-                            unique_reviews_for_new_q.append(r_new)
-                            processed_reviews_in_this_category_run.add(r_key)
-                            reviews_added_count += 1
-                    if unique_reviews_for_new_q:
-                        q_new.review_section.reviews = unique_reviews_for_new_q
-                        category_questions.append(q_new)
-                else:
-                    for r_new in q_new.review_section.reviews:
-                        r_key = (hash(existing_q.question_text), hash(r_new.text), r_new.date)
-                        if r_key not in processed_reviews_in_this_category_run:
-                            existing_q.review_section.reviews.append(r_new)
-                            processed_reviews_in_this_category_run.add(r_key)
-                            reviews_added_count += 1
-                    existing_q.review_section.reviews.sort(key=lambda r: r.date, reverse=True)
-            return reviews_added_count
+        soup_cat_page1 = BeautifulSoup(driver.page_source, 'html.parser')
+        current_cat_page_url_p1 = driver.current_url
+        s_cookies = driver.get_cookies()
+        selenium_cookies_for_hybrid = {c['name']: c['value'] for c in s_cookies}
 
-        added_count_p1 = merge_questions(questions_page1)
-        if added_count_p1 > 0: print(f"  [{thread_name}] Selenium: Added {added_count_p1} unique reviews from page 1.")
-        elif not questions_page1: print(f"  [{thread_name}] Selenium: No reviews parsed from page 1.")
+        print(f"  [{thread_name}] Selenium: Processing Cat Page 1 ({current_cat_page_url_p1}) questions & their review sub-pages...")
+        # Use an httpx client with Selenium's cookies to process Q-reviews on Cat Page 1
+        with httpx.Client(cookies=selenium_cookies_for_hybrid, follow_redirects=True, timeout=HTTPX_TIMEOUT_S) as q_review_client_for_cat_p1:
+            _process_one_category_page_soup(
+                soup_cat_page1, 
+                current_cat_page_url_p1,
+                q_review_client_for_cat_p1,
+                base_httpx_headers.copy()
+            )
 
-
-        # Extract next_page_url and cookies using Selenium
+        # Extract NEXT CATEGORY page_url from soup_cat_page1 (Selenium-viewed page)
         for sel in NEXT_PAGE_SELECTORS:
-            try:
-                buttons = driver.find_elements(By.CSS_SELECTOR, sel)
-                for btn in buttons:
-                    if btn.is_displayed():
-                        href = btn.get_attribute('href')
-                        aria_label = (btn.get_attribute("aria-label") or "").lower()
-                        rel_attr = (btn.get_attribute("rel") or "").lower()
-                        title_attr = (btn.get_attribute("title") or "").lower()
-                        # Ensure it's not a "previous" link
-                        if "prev" in aria_label or "prev" in rel_attr or "prev" in title_attr:
-                            continue
-                        if href and href != '#' and not href.startswith('javascript:'):
-                            next_page_url_from_selenium = urljoin(driver.current_url, href)
-                            print(f"  [{thread_name}] Selenium: Found 'Next Page' href: {next_page_url_from_selenium} with selector '{sel}'")
-                            break
-                if next_page_url_from_selenium: break
-            except Exception: continue
-        
-        if next_page_url_from_selenium:
-            s_cookies = driver.get_cookies()
-            selenium_cookies_dict = {c['name']: c['value'] for c in s_cookies}
-            # print(f"  [{thread_name}] Selenium: Extracted {len(selenium_cookies_dict)} cookies.")
-        else:
-            print(f"  [{thread_name}] Selenium: No 'Next Page' href found on page 1. Category might have only one page.")
+            buttons = soup_cat_page1.select(sel) # Use select on soup
+            for btn_tag in buttons:
+                href = btn_tag.get('href')
+                aria_label = (btn_tag.get("aria-label", "") or "").lower()
+                rel_attr = (btn_tag.get("rel", "") or "").lower()
+                title_attr = (btn_tag.get("title", "") or "").lower()
+                text_content = btn_tag.get_text(strip=True).lower()
+                is_prev = any(indicator in val for indicator in ["prev", "older", "back"] for val in [aria_label, rel_attr, title_attr, text_content])
+                is_disabled = any(cls in (btn_tag.get('class', [])) for cls in ['disabled', 'inactive']) or btn_tag.has_attr('disabled')
+                if is_prev or is_disabled: continue
 
-    except Exception as e_sel:
-        print(f"  [{thread_name}] CRITICAL ERROR during Selenium phase: {e_sel}")
+                if href and href != '#' and not href.startswith("javascript:"):
+                    next_category_page_url_from_selenium = urljoin(current_cat_page_url_p1, href)
+                    print(f"  [{thread_name}] Selenium: Found Next Cat Page link: {next_category_page_url_from_selenium}")
+                    break
+            if next_category_page_url_from_selenium: break
+        
+    except Exception as e_sel_phase:
+        print(f"  [{thread_name}] CRITICAL ERROR during Selenium phase: {e_sel_phase}")
         traceback.print_exc()
     finally:
         if driver:
             driver.quit()
-            print(f"  [{thread_name}] Selenium WebDriver instance quit.")
+            print(f"  [{thread_name}] Selenium WebDriver instance for Cat Page 1 quit.")
 
-    # --- Phase 2: httpx for subsequent pages ---
-    if not next_page_url_from_selenium:
-        print(f"  [{thread_name}] Finished after Selenium phase (no next page found). Total Qs: {len(category_questions)}")
-        return category_name, category_questions
+    # --- HTTPX Phase for subsequent CATEGORY pages ---
+    if not next_category_page_url_from_selenium:
+        print(f"  [{thread_name}] Finished after Selenium phase (no next category page). Total unique Qs: {len(collected_questions_for_category)}")
+        return category_name, collected_questions_for_category
 
-    page_count = 1 # Selenium handled page 1
-    current_url_for_httpx = next_page_url_from_selenium
+    current_httpx_cat_page_url = next_category_page_url_from_selenium
+    category_page_count = 1 # Selenium handled page 1
     
-    user_agent_to_use = ua.random if ua else "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36"
-    httpx_headers = {
-        'User-Agent': user_agent_to_use,
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.9',
-        'Accept-Language': 'en-US,en;q=0.9',
-        # Referer will be set to the previous page's URL dynamically
-    }
-
-    with httpx.Client(cookies=selenium_cookies_dict, follow_redirects=True, timeout=HTTPX_TIMEOUT_S) as http_client:
-        while current_url_for_httpx and page_count < MAX_PAGES_PER_CATEGORY:
-            page_count += 1
-            print(f"  [{thread_name}] HTTPX: Requesting page {page_count} (URL: {current_url_for_httpx})")
+    with httpx.Client(cookies=selenium_cookies_for_hybrid, follow_redirects=True, timeout=HTTPX_TIMEOUT_S) as main_category_httpx_client:
+        while current_httpx_cat_page_url and category_page_count < MAX_CATEGORY_PAGES:
+            category_page_count += 1
+            print(f"  [{thread_name}] HTTPX: Requesting Cat Page {category_page_count} (URL: {current_httpx_cat_page_url})")
             
+            httpx_cat_headers = base_httpx_headers.copy()
             # Set Referer to the URL of the page that linked to this one
-            # For the first httpx request, referer can be the category_url_start or driver.current_url from Selenium phase
-            if page_count == 2: # First httpx request
-                 httpx_headers['Referer'] = category_url_start # or driver.current_url if available
-            # For subsequent httpx requests, Referer is implicitly handled by httpx if it was the previous response's URL,
-            # or we could set it explicitly to the previous current_url_for_httpx.
-            # httpx.Client with follow_redirects=True handles referrers on redirects.
-            # For direct GETs, it's good practice to set it if known.
+            if category_page_count == 2 and current_cat_page_url_p1 : # First httpx cat page request
+                 httpx_cat_headers['Referer'] = current_cat_page_url_p1
+            elif 'previous_cat_page_url_for_referer' in locals() and previous_cat_page_url_for_referer:
+                 httpx_cat_headers['Referer'] = previous_cat_page_url_for_referer
+
 
             try:
-                time.sleep(random.uniform(0.7, 1.8)) # Politeness delay
-                response = http_client.get(current_url_for_httpx, headers=httpx_headers)
-                
-                # Update referer for the *next* potential request
-                httpx_headers['Referer'] = str(response.url)
+                time.sleep(random.uniform(0.8, 1.9)) # Politeness delay for category pages
+                response_cat_page = main_category_httpx_client.get(current_httpx_cat_page_url, headers=httpx_cat_headers)
+                previous_cat_page_url_for_referer = str(response_cat_page.url) # For next iteration
+                response_cat_page.raise_for_status()
 
-                response.raise_for_status()
-
-                html_content_httpx = response.text
-                soup_httpx = BeautifulSoup(html_content_httpx, 'html.parser')
+                soup_httpx_cat_pageN = BeautifulSoup(response_cat_page.text, 'html.parser')
                 
-                if "Error" in (soup_httpx.title.string if soup_httpx.title else "") or "Access Denied" in html_content_httpx:
-                    print(f"  [{thread_name}] HTTPX: Error page detected on page {page_count}. Stopping.")
+                if "Error" in (soup_httpx_cat_pageN.title.string if soup_httpx_cat_pageN.title else "") or "Access Denied" in response_cat_page.text:
+                    print(f"  [{thread_name}] HTTPX: Error page detected on Cat Page {category_page_count}. Stopping.")
                     break
-                if not soup_httpx.find(REVIEW_BLOCK_CSS_SELECTOR.split('.')[0], class_=REVIEW_BLOCK_CSS_SELECTOR.split('.')[1] if '.' in REVIEW_BLOCK_CSS_SELECTOR else None):
-                    print(f"  [{thread_name}] HTTPX: No review blocks found on page {page_count}. Likely end of content.")
+                if not soup_httpx_cat_pageN.find(['div.reviewsList', 'div.cppRH']): # Check for actual review content
+                    print(f"  [{thread_name}] HTTPX: No review/question blocks found on Cat Page {category_page_count}. Likely end.")
                     break
 
-                questions_this_page_httpx = parse_review_page_html(soup_httpx, company_slug, category_name, start_date_filter, end_date_filter)
-                added_count_httpx = merge_questions(questions_this_page_httpx)
+                print(f"  [{thread_name}] HTTPX: Processing Cat Page {category_page_count} ({previous_cat_page_url_for_referer}) questions & their review sub-pages...")
+                _process_one_category_page_soup(
+                    soup_httpx_cat_pageN,
+                    previous_cat_page_url_for_referer, 
+                    main_category_httpx_client, # This same client fetches Q-review sub-pages
+                    base_httpx_headers.copy() # Pass base headers, referer will be handled by _process_one_category_page_soup for its sub-requests
+                )
 
-                if added_count_httpx > 0: print(f"  [{thread_name}] HTTPX: Added {added_count_httpx} unique reviews from page {page_count}.")
-                elif not questions_this_page_httpx: print(f"  [{thread_name}] HTTPX: No reviews parsed from page {page_count}.")
-
-
-                # Extract next_page_url using BeautifulSoup from current httpx page
-                next_page_url_bs = None
-                for sel_bs in NEXT_PAGE_SELECTORS:
-                    buttons_bs = soup_httpx.select(sel_bs)
-                    for btn_bs in buttons_bs:
-                        href_bs = btn_bs.get('href')
-                        aria_label_bs = (btn_bs.get("aria-label", "") or "").lower()
-                        rel_attr_bs = (btn_bs.get("rel", "") or "").lower()
-                        title_bs = (btn_bs.get("title","") or "").lower()
+                # Extract NEXT CATEGORY page_url from soup_httpx_cat_pageN
+                next_cat_page_url_from_httpx = None
+                for sel in NEXT_PAGE_SELECTORS:
+                    buttons = soup_httpx_cat_pageN.select(sel)
+                    for btn_tag in buttons:
+                        href = btn_tag.get('href')
+                        aria_label = (btn_tag.get("aria-label", "") or "").lower()
+                        rel_attr = (btn_tag.get("rel", "") or "").lower()
+                        title_attr = (btn_tag.get("title", "") or "").lower()
+                        text_content = btn_tag.get_text(strip=True).lower()
+                        is_prev = any(indicator in val for indicator in ["prev", "older", "back"] for val in [aria_label, rel_attr, title_attr, text_content])
+                        is_disabled = any(cls in (btn_tag.get('class', [])) for cls in ['disabled', 'inactive']) or btn_tag.has_attr('disabled')
+                        if is_prev or is_disabled: continue
                         
-                        if "prev" in aria_label_bs or "prev" in rel_attr_bs or "prev" in title_bs:
-                            continue
-                        
-                        if href_bs and href_bs != '#' and not href_bs.startswith('javascript:'):
-                            next_page_url_bs = urljoin(str(response.url), href_bs) # Base URL is the current response URL
-                            print(f"  [{thread_name}] HTTPX: Found 'Next Page' href: {next_page_url_bs} with selector '{sel_bs}'")
+                        if href and href != '#' and not href.startswith("javascript:"):
+                            next_cat_page_url_from_httpx = urljoin(previous_cat_page_url_for_referer, href)
+                            # print(f"  [{thread_name}] HTTPX: Found Next Cat Page link: {next_cat_page_url_from_httpx}")
                             break
-                    if next_page_url_bs: break
+                    if next_cat_page_url_from_httpx: break
                 
-                current_url_for_httpx = next_page_url_bs
-                if not current_url_for_httpx:
-                    print(f"  [{thread_name}] HTTPX: No 'Next Page' href found on page {page_count}. End of category pagination.")
+                current_httpx_cat_page_url = next_cat_page_url_from_httpx
+                if not current_httpx_cat_page_url:
+                    print(f"  [{thread_name}] HTTPX: No Next Cat Page link found on Cat Page {category_page_count}.")
                     break
 
-            except httpx.RequestError as e_req:
-                print(f"  [{thread_name}] HTTPX: Request error for page {page_count} (URL: {current_url_for_httpx}): {e_req}")
-                break
-            except httpx.HTTPStatusError as e_status:
-                print(f"  [{thread_name}] HTTPX: HTTP status error {e_status.response.status_code} for page {page_count} (URL: {current_url_for_httpx}).")
-                break
-            except Exception as e_page:
-                print(f"  [{thread_name}] HTTPX: Error processing page {page_count} (URL: {current_url_for_httpx}): {e_page}")
+            except Exception as e_httpx_cat_page:
+                print(f"  [{thread_name}] HTTPX: Error on Cat Page {category_page_count} (URL: {current_httpx_cat_page_url}): {e_httpx_cat_page}")
                 traceback.print_exc()
                 break
     
-    print(f"  [{thread_name}] Finished. Total Qs: {len(category_questions)} after {page_count} page(s).")
-    return category_name, category_questions
+    print(f"  [{thread_name}] Finished. Total unique Qs for category: {len(collected_questions_for_category)}")
+    return category_name, collected_questions_for_category
 
 
-# --- MODIFIED: Main Orchestrator (calls hybrid scraper) ---
+# --- Main Orchestrator (Unchanged from v1.7.0 - calls the modified hybrid scraper) ---
 def scrape_comparably_sync(
     company_base_url_str: str,
     company_slug: str,
     start_date_filter: Optional[datetime] = None,
     end_date_filter: Optional[datetime] = None
 ) -> Dict[str, Any]:
-    print(f"Orchestrating HYBRID parallel category scrape for: {company_slug}")
+    print(f"Orchestrating HYBRID DEEP REVIEWS parallel category scrape for: {company_slug}")
     start_time_total = time.time()
-    all_questions_for_company: List[Question] = []
+    all_questions_for_company: List[Question] = [] # Final list of all questions from all categories
     company_details_overall: Dict[str, Any] = {}
     initial_info_driver = None
 
-    # Step 1: Fetch Initial Company Info (Selenium - unchanged for now, as it's once per company)
+    # Step 1: Fetch Initial Company Info (Selenium)
     try:
         print(f"  [{company_slug}] Fetching initial company info with Selenium...")
         initial_info_driver = setup_selenium_driver()
-        # Try /reviews/ first, then base URL for company info
         info_fetch_url = urljoin(company_base_url_str.rstrip('/') + "/", "reviews/")
         initial_info_driver.get(info_fetch_url)
         time.sleep(1.5)
         if "Error" in initial_info_driver.title or "Not Found" in initial_info_driver.title or "Access Denied" in initial_info_driver.page_source:
-            print(f"  [{company_slug}] /reviews/ page for info failed (Title: {initial_info_driver.title}), trying base URL: {company_base_url_str}")
+            print(f"  [{company_slug}] /reviews/ page for info failed, trying base URL: {company_base_url_str}")
             initial_info_driver.get(company_base_url_str)
             time.sleep(1.5)
             if "Error" in initial_info_driver.title or "Not Found" in initial_info_driver.title or "Access Denied" in initial_info_driver.page_source:
@@ -424,8 +494,7 @@ def scrape_comparably_sync(
         company_details_overall = extract_company_info(info_soup, company_base_url_str)
         print(f"  [{company_slug}] Initial company info fetched: Name='{company_details_overall.get('company_name')}'")
     except Exception as e_info:
-        print(f"  [{company_slug}] Error fetching initial company info with Selenium: {e_info}")
-        # traceback.print_exc() # Can be verbose
+        print(f"  [{company_slug}] Error fetching initial company info: {e_info}")
         company_details_overall = {"company_name": company_slug.replace('-', ' ').title(), "comparably_url": company_base_url_str, "status_note": f"Initial info fetch error: {str(e_info)}"}
     finally:
         if initial_info_driver:
@@ -433,43 +502,41 @@ def scrape_comparably_sync(
             except Exception as e_close: print(f"  [{company_slug}] Error closing Selenium info browser: {e_close}")
 
     # Step 2: Scrape categories in parallel using the hybrid scraper
-    max_concurrent_categories = min(len(REVIEW_CATEGORIES), 3) # Keep concurrency manageable
-    print(f"  [{company_slug}] Starting HYBRID parallel scrape for {len(REVIEW_CATEGORIES)} categories (max {max_concurrent_categories} concurrent)...")
+    max_concurrent_categories = min(len(REVIEW_CATEGORIES), 3)
+    print(f"  [{company_slug}] Starting HYBRID DEEP REVIEWS parallel scrape for {len(REVIEW_CATEGORIES)} categories (max {max_concurrent_categories} concurrent)...")
     futures_map = {}
-    with ThreadPoolExecutor(max_workers=max_concurrent_categories, thread_name_prefix="HybridScraperPool") as executor:
-        for category_name in REVIEW_CATEGORIES:
+    with ThreadPoolExecutor(max_workers=max_concurrent_categories, thread_name_prefix="HybridDeepPool") as executor:
+        for cat_name_iter in REVIEW_CATEGORIES: # Use a different variable name
             future = executor.submit(
-                _scrape_specific_category_all_pages_hybrid, # Use HYBRID version
-                company_base_url_str, category_name, company_slug,
+                _scrape_specific_category_all_pages_hybrid,
+                company_base_url_str, cat_name_iter, company_slug,
                 start_date_filter, end_date_filter
             )
-            futures_map[future] = category_name
+            futures_map[future] = cat_name_iter
         
         for future in as_completed(futures_map):
-            original_category_name = futures_map[future]
+            original_category_name_from_future = futures_map[future]
             try:
-                _, questions_from_category = future.result() # Result is (cat_name, questions_list)
+                _, questions_from_category = future.result() 
                 if questions_from_category:
-                    print(f"  [{company_slug}] Received {len(questions_from_category)} Qs from cat '{original_category_name}'. Merging...")
-                    all_questions_for_company.extend(questions_from_category) # Directly extend
+                    print(f"  [{company_slug}] Received {len(questions_from_category)} Qs from cat '{original_category_name_from_future}'. Merging...")
+                    all_questions_for_company.extend(questions_from_category)
                 else:
-                    print(f"  [{company_slug}] Cat '{original_category_name}' returned no new Qs.")
+                    print(f"  [{company_slug}] Cat '{original_category_name_from_future}' returned no Qs.")
             except Exception as e_future_exc:
-                print(f"  [{company_slug}] HYBRID Category scraping task for '{original_category_name}' FAILED in executor: {e_future_exc}")
+                print(f"  [{company_slug}] HYBRID DEEP REVIEWS Category task for '{original_category_name_from_future}' FAILED in executor: {e_future_exc}")
                 traceback.print_exc()
 
     total_duration = time.time() - start_time_total
-    print(f"\nFinished ALL HYBRID parallel category scrapes for {company_slug} in {total_duration:.2f}s. Total Qs collected: {len(all_questions_for_company)}")
+    print(f"\nFinished ALL HYBRID DEEP REVIEWS scrapes for {company_slug} in {total_duration:.2f}s. Total Qs collected: {len(all_questions_for_company)}")
     
-    # Ensure company_name is reasonable
     if not company_details_overall.get("company_name") or company_details_overall.get("company_name", "").lower() == company_slug.lower() or company_details_overall.get("company_name", "") == "unknown_company":
         current_name = company_details_overall.get("company_name", "unknown_company")
         fallback_name = company_slug.replace('-', ' ').title()
-        if current_name.lower() in REVIEW_CATEGORIES or current_name == "unknown_company": # If current name is bad
+        if current_name.lower() in REVIEW_CATEGORIES or current_name == "unknown_company":
              company_details_overall["company_name"] = fallback_name
              if "status_note" not in company_details_overall: company_details_overall["status_note"] = "Name set to fallback slug-based name."
              print(f"  [{company_slug}] Company name was '{current_name}', updated to fallback '{fallback_name}'.")
-
 
     return {
         "status": "success" if all_questions_for_company or (company_details_overall.get("company_name") != company_slug.replace('-', ' ').title() and company_details_overall.get("company_name") != "unknown_company") else "partial_success_no_reviews",
@@ -479,8 +546,7 @@ def scrape_comparably_sync(
         }
     }
 
-
-# --- FastAPI Endpoint (largely unchanged, ensure it calls new orchestrator) ---
+# --- FastAPI Endpoint (Unchanged from v1.7.0) ---
 @app.post("/scrape")
 async def scrape_companies(request: ScrapeRequest = Body(...)) -> Dict[str, Dict[str, Any]]:
     urls = request.urls
@@ -499,66 +565,62 @@ async def scrape_companies(request: ScrapeRequest = Body(...)) -> Dict[str, Dict
         raise HTTPException(status_code=400, detail="No URLs provided.")
 
     results: Dict[str, Dict[str, Any]] = {}
-    tasks = []
+    valid_scrape_params = [] # Stores {'original_url': ..., 'base_url': ..., 'slug': ...}
     
     date_filter_msg = f" (Start: {request.start_date_str or 'N/A'}, End: {request.end_date_str or 'N/A'})"
-    print(f"API request: {len(urls)} URLs, Hybrid Selenium/HTTPX & Date Filter{date_filter_msg} (v{app.version}).")
+    print(f"API request: {len(urls)} URLs, Hybrid DeepReviews & Date Filter{date_filter_msg} (v{app.version}).")
 
-    # Create a list of (url_str, company_slug) tuples for task submission, handling bad URLs early
-    valid_scrape_params = []
     for url_obj in urls:
         url_str = str(url_obj)
         try:
             parsed_url = urlparse(url_str)
             path_segments = [seg for seg in parsed_url.path.strip('/').split('/') if seg]
             if not (parsed_url.scheme and parsed_url.netloc and len(path_segments) >= 2 and path_segments[0] == "companies"):
-                raise ValueError("URL path error or incomplete URL")
+                raise ValueError("URL format error or incomplete URL")
             company_slug = path_segments[1]
-            # Construct a canonical base URL for the company
             company_base_url = f"{parsed_url.scheme}://{parsed_url.netloc}/companies/{company_slug}"
             valid_scrape_params.append({'original_url': url_str, 'base_url': company_base_url, 'slug': company_slug})
         except Exception as e_slug:
             print(f"Error parsing slug/URL '{url_str}': {e_slug}")
             results[url_str] = {"status": "error", "message": f"Invalid Comparably company URL format: {url_str}. Error: {e_slug}"}
-            
-    # Submit valid tasks
-    for params in valid_scrape_params:
-        tasks.append(asyncio.to_thread(
-            scrape_comparably_sync, 
-            params['base_url'], 
-            params['slug'], 
-            start_date_filter, 
-            end_date_filter
-        ))
+    
+    tasks = []
+    if valid_scrape_params:
+        for params in valid_scrape_params:
+            tasks.append(asyncio.to_thread(
+                scrape_comparably_sync, 
+                params['base_url'], 
+                params['slug'], 
+                start_date_filter, 
+                end_date_filter
+            ))
     
     if tasks:
         scraped_results_or_exceptions = await asyncio.gather(*tasks, return_exceptions=True)
-    else: # No valid tasks to run
+    else:
         scraped_results_or_exceptions = []
 
-    # Process results
     task_idx = 0
-    for params in valid_scrape_params: # Iterate through what was submitted
+    for params in valid_scrape_params:
         original_url_str = params['original_url']
-        if original_url_str in results: continue # Already has an error from parsing
+        if original_url_str in results: continue 
 
         if task_idx < len(scraped_results_or_exceptions):
             result_or_exc = scraped_results_or_exceptions[task_idx]
             if isinstance(result_or_exc, Exception):
                 print(f"Task for {original_url_str} EXCEPTION (type: {type(result_or_exc).__name__}): {result_or_exc}")
                 tb_str = "".join(traceback.format_exception(None, result_or_exc, result_or_exc.__traceback__))
-                print(f"FULL TRACEBACK for {original_url_str} (Hybrid):\n{tb_str}")
+                print(f"FULL TRACEBACK for {original_url_str} (HybridDeep):\n{tb_str}")
                 results[original_url_str] = {"status": "error", "message": f"Scraping task failed. Type: {type(result_or_exc).__name__}. Check logs."}
             elif isinstance(result_or_exc, dict):
                 results[original_url_str] = result_or_exc
             else:
                 results[original_url_str] = {"status": "error", "message": "Unexpected internal result type from scraping task"}
             task_idx +=1
-        else: # Should not happen if logic is correct
-             results[original_url_str] = {"status": "error", "message": "Scraping task result missing."}
+        else:
+             results[original_url_str] = {"status": "error", "message": "Scraping task result missing (logic error)."}
 
-
-    print(f"Finished API request processing (Hybrid v{app.version}).")
+    print(f"Finished API request processing (HybridDeep v{app.version}).")
     return results
 
 # --- Health Check Endpoint ---
@@ -568,6 +630,5 @@ async def health_check(): return {"status": "ok"}
 # --- Main guard for uvicorn ---
 # if __name__ == "__main__":
 #     import uvicorn
-#     # Note: Reload should be False in production or when debugging threading issues.
-#     uvicorn.run("v3_hybrid:app", host="0.0.0.0", port=8000, reload=True)
+#     uvicorn.run("v3_hybrid_deep_reviews:app", host="0.0.0.0", port=8000, reload=False) # reload=False for stable threading
 

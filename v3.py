@@ -398,11 +398,3 @@ async def scrape_companies(request: ScrapeRequest = Body(...)) -> Dict[str, Dict
         else: results[url_str] = {"status": "error", "message": "Unexpected internal result type"}
     print(f"Finished API request processing (Selenium v1.6.0).")
     return results
-
-# --- Health Check Endpoint ---
-@app.get("/health")
-async def health_check(): return {"status": "ok"}
-
-# if __name__ == "__main__":
-#     import uvicorn
-#     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
