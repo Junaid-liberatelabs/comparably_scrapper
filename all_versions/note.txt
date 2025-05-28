@@ -1,5 +1,4 @@
-main - > used v7 (current best)
-
+main - > used v7 
 v1 -> no parallel
 
 v2 -> parallel task reduces time (selenium)
@@ -12,4 +11,21 @@ v5 -> playwright
 
 v6 -> selenium + request-html
 
-v7 -> refined  - current best
+v7 -> refined (stable)
+
+v8 - attemp of removing selenium
+
+v9 - refined use of selenium+ curl+ lxml (current best)
+
+v10 - only selelnium based solution
+
+v11 - like v9 but better time
+
+v12 - pop up detection (108 seconds best time)
+
+v13 - best achieved 105 seconds
+
+v14 - adding interviews section in v13 but failed
+
+v15- latest update with resolved bugs (stable)
+v16- network layer intercept (not a better time)

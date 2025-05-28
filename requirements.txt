@@ -3,6 +3,13 @@ uvicorn[standard]
 pydantic
 beautifulsoup4
 selenium
+lxml
 webdriver-manager
 curl_cffi
 fake-useragent
+undetected-chromedriver
+blinker==1.7.0
+# setuptools
+setuptools==66.1.1
+
+# pip install selenium-wire selenium-stealth

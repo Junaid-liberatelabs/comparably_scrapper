@@ -1,0 +1,31 @@
+version: '3.8'
+
+services:
+  scraper-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: comparably-scraper-api
+    ports:
+      - "8000:8000" # Map host port 8000 to container port 8000
+    # Optional: Add environment variables if needed
+    # environment:
+    #   - SOME_VARIABLE=some_value
+    # Optional: Add volumes for development (auto-reloads on code change if uvicorn configured for it)
+    # For production, building the image with code is generally preferred.
+    # volumes:
+    #   - ./v15.py:/app/v15.py
+    #   - ./requirements.txt:/app/requirements.txt # If you change reqs, you'd need to rebuild though
+
+    # It's good practice to set resource limits
+    # deploy:
+    #   resources:
+    #     limits:
+    #       cpus: '1.0'
+    #       memory: '2G'
+    #     reservations:
+    #       cpus: '0.5'
+    #       memory: '1G'
+
+    # If Chrome needs more shared memory (though --disable-dev-shm-usage should help)
+    # shm_size: '2gb'

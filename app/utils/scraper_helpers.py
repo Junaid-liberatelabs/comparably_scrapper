@@ -32,7 +32,7 @@ def _parse_reviews_from_block(
     review_container_soup: BeautifulSoup,
     start_date_filter: Optional[datetime],
     end_date_filter: Optional[datetime],
-    # Potentially add thread_name here for more specific logging if needed
+   
 ) -> List[Dict]: # Returning list of dicts to be converted to Review model later
     reviews_found: List[Dict] = []
     review_blocks = review_container_soup.find_all('div', class_='cppRH')
@@ -50,7 +50,7 @@ def _parse_reviews_from_block(
             date_str = date_meta_tag['content']
             date_val = datetime.strptime(date_str, '%Y-%m-%d')
         except ValueError:
-            # print(f"  [ParseReviewBlock] Error parsing date: {date_str} for review text: {text[:50]}...") # Example debug
+            # print(f"  [ParseReviewBlock] Error parsing date: {date_str} for review text: {text[:50]}...") 
             continue
         if start_date_filter and date_val < start_date_filter: continue
         if end_date_filter and date_val > end_date_filter: continue
@@ -82,7 +82,7 @@ def extract_company_info(soup: BeautifulSoup, company_base_url_str: str) -> Dict
 
 def setup_selenium_driver() -> webdriver.Chrome:
     options = webdriver.ChromeOptions()
-    options.add_argument("--headless")
+    # options.add_argument("--headless")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--disable-gpu")
